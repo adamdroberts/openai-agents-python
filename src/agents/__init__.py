@@ -78,6 +78,7 @@ from .memory import (
     is_openai_responses_compaction_aware_session,
 )
 from .model_settings import ModelSettings
+from .model_task import ModelTaskResult
 from .models.interface import Model, ModelProvider, ModelTracing
 from .models.multi_provider import MultiProvider
 from .models.openai_agent_registration import OpenAIAgentRegistrationConfig
@@ -232,6 +233,7 @@ from .tracing import (
 )
 from .usage import Usage
 from .version import __version__
+from .work_queue import InMemoryWorkQueue, QueuedWorkItem, RedisWorkQueue, WorkQueueDepths
 
 if TYPE_CHECKING:
     from .memory.sqlite_session import SQLiteSession
@@ -334,6 +336,7 @@ __all__ = [
     "run_demo_loop",
     "Model",
     "ModelProvider",
+    "ModelTaskResult",
     "ModelTracing",
     "ModelSettings",
     "ModelRetryAdvice",
@@ -429,6 +432,10 @@ __all__ = [
     "AgentToolInvocation",
     "RunResult",
     "RunResultStreaming",
+    "InMemoryWorkQueue",
+    "QueuedWorkItem",
+    "RedisWorkQueue",
+    "WorkQueueDepths",
     "ResponsesWebSocketSession",
     "RunConfig",
     "ReasoningItemIdPolicy",

@@ -98,8 +98,10 @@ class FakeModel(Model):
             "model_settings": model_settings,
             "tools": tools,
             "output_schema": output_schema,
+            "handoffs": handoffs,
             "previous_response_id": previous_response_id,
             "conversation_id": conversation_id,
+            "prompt": prompt,
         }
 
         if self.first_turn_args is None:
@@ -164,8 +166,10 @@ class FakeModel(Model):
             "model_settings": model_settings,
             "tools": tools,
             "output_schema": output_schema,
+            "handoffs": handoffs,
             "previous_response_id": previous_response_id,
             "conversation_id": conversation_id,
+            "prompt": prompt,
         }
 
         if self.first_turn_args is None:

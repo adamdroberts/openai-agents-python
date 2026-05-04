@@ -44,6 +44,61 @@ The runner then runs a loop:
 
     The rule for whether the LLM output is considered as a "final output" is that it produces text output with the desired type, and there are no tool calls.
 
+### Direct model tasks
+
+Use [`Runner.ask_model()`][agents.run.Runner.ask_model] when you want one scoped model call and your application should decide what happens next. This is useful for review, validation, scoring, extraction, or any other bounded subtask where you want the model's output but do not want the SDK to run tools, MCP servers, handoffs, or the full agent loop.
+
+`ask_model` uses the agent's instructions, model, model settings, prompt, and output type. It also applies [`RunConfig.call_model_input_filter`][agents.run.RunConfig.call_model_input_filter]. The call returns a [`ModelTaskResult`][agents.model_task.ModelTaskResult] containing the raw response, extracted text, parsed final output, usage, and the exact model input.
+
+```python
+from pydantic import BaseModel
+
+from agents import Agent, Runner
+
+
+class ReviewDecision(BaseModel):
+    answer: str
+    rationale: str
+
+
+reviewer = Agent(
+    name="Reviewer",
+    instructions="Review the request and return a concise decision.",
+    output_type=ReviewDecision,
+)
+
+result = await Runner.ask_model(reviewer, "Review this request: ...")
+
+decision = result.final_output
+if decision.answer == "approve":
+    # Your application owns the next step.
+    ...
+```
+
+Because this is not an agent loop, model tasks do not run tools or handoffs and do not execute input/output guardrails. Use `Runner.run()` when you want the SDK to orchestrate those behaviors.
+
+### Work queues
+
+Use [`InMemoryWorkQueue`][agents.work_queue.InMemoryWorkQueue] or [`RedisWorkQueue`][agents.work_queue.RedisWorkQueue] when your application has staged workers and needs lease-based job coordination. A queue item has an `item_id`, JSON-like payload, numeric priority score, version, and lease. Workers reserve an item, process it, then finalize it. If a newer version is enqueued while the old version is processing, `finalize()` requeues the newer payload instead of dropping it.
+
+```python
+from agents import InMemoryWorkQueue
+
+
+queue = InMemoryWorkQueue(lease_seconds=30)
+queue.enqueue("task-1", {"input": "..."}, score=10)
+
+item = queue.reserve(timeout_seconds=1.0)
+if item is not None:
+    try:
+        output = await handle_task(item.payload)
+        await store_output(item.item_id, output)
+    finally:
+        queue.finalize(item)
+```
+
+`RedisWorkQueue` provides the same public methods for multi-process deployments when the optional `redis` extra is installed.
+
 ### Streaming
 
 Streaming allows you to additionally receive streaming events as the LLM runs. Once the stream is done, the [`RunResultStreaming`][agents.result.RunResultStreaming] will contain the complete information about the run, including all the new outputs produced. You can call `.stream_events()` for the streaming events. Read more in the [streaming guide](streaming.md).

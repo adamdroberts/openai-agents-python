@@ -95,6 +95,8 @@ plugins:
                     - Agents module: ref/index.md
                     - Agent: ref/agent.md
                     - Runner: ref/run.md
+                    - Model tasks: ref/model_task.md
+                    - Work queues: ref/work_queue.md
                     - Run config: ref/run_config.md
                     - Run state: ref/run_state.md
                     - Sandbox:

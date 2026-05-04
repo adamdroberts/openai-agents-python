@@ -29,6 +29,7 @@ from .items import (
 from .lifecycle import RunHooks
 from .logger import logger
 from .memory import Session
+from .model_task import ModelTaskResult, ask_model as _ask_model
 from .result import RunResult, RunResultStreaming
 from .run_config import (
     DEFAULT_MAX_TURNS,
@@ -132,6 +133,7 @@ __all__ = [
     "RunOptions",
     "RunState",
     "RunContextWrapper",
+    "ModelTaskResult",
     "ModelInputData",
     "CallModelData",
     "CallModelInputFilter",
@@ -350,6 +352,64 @@ class Runner:
         )
 
     @classmethod
+    async def ask_model(
+        cls,
+        agent: Agent[TContext],
+        input: str | list[TResponseInputItem],
+        *,
+        context: TContext | None = None,
+        hooks: RunHooks[TContext] | None = None,
+        run_config: RunConfig | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> ModelTaskResult[TContext]:
+        """
+        Ask an agent's model to perform one scoped task without running the agent loop.
+
+        Unlike `run`, this makes a single model call and does not expose tools, MCP tools, or
+        handoffs. Application code receives the raw response and parsed output and decides what to
+        do next.
+        """
+
+        runner = DEFAULT_AGENT_RUNNER
+        return await runner.ask_model(
+            agent,
+            input,
+            context=context,
+            hooks=hooks,
+            run_config=run_config,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+        )
+
+    @classmethod
+    def ask_model_sync(
+        cls,
+        agent: Agent[TContext],
+        input: str | list[TResponseInputItem],
+        *,
+        context: TContext | None = None,
+        hooks: RunHooks[TContext] | None = None,
+        run_config: RunConfig | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> ModelTaskResult[TContext]:
+        """
+        Synchronous wrapper for `ask_model`.
+        """
+
+        runner = DEFAULT_AGENT_RUNNER
+        return runner.ask_model_sync(
+            agent,
+            input,
+            context=context,
+            hooks=hooks,
+            run_config=run_config,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+        )
+
+    @classmethod
     def run_streamed(
         cls,
         starting_agent: Agent[TContext],
@@ -430,6 +490,91 @@ class AgentRunner:
     WARNING: this class is experimental and not part of the public API
     It should not be used directly or subclassed.
     """
+
+    async def ask_model(
+        self,
+        agent: Agent[TContext],
+        input: str | list[TResponseInputItem],
+        *,
+        context: TContext | None = None,
+        hooks: RunHooks[TContext] | None = None,
+        run_config: RunConfig | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> ModelTaskResult[TContext]:
+        """
+        Ask an agent's model to perform one scoped task without running the agent loop.
+        """
+
+        return await _ask_model(
+            agent,
+            input,
+            context=context,
+            hooks=hooks,
+            run_config=run_config,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+        )
+
+    def ask_model_sync(
+        self,
+        agent: Agent[TContext],
+        input: str | list[TResponseInputItem],
+        *,
+        context: TContext | None = None,
+        hooks: RunHooks[TContext] | None = None,
+        run_config: RunConfig | None = None,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+    ) -> ModelTaskResult[TContext]:
+        """
+        Synchronous wrapper for `ask_model`.
+        """
+
+        try:
+            already_running_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            already_running_loop = None
+
+        if already_running_loop is not None:
+            raise RuntimeError(
+                "AgentRunner.ask_model_sync() cannot be called when an event loop is already "
+                "running."
+            )
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            policy = asyncio.get_event_loop_policy()
+            try:
+                default_loop = policy.get_event_loop()
+            except RuntimeError:
+                default_loop = policy.new_event_loop()
+                policy.set_event_loop(default_loop)
+
+        task = default_loop.create_task(
+            self.ask_model(
+                agent,
+                input,
+                context=context,
+                hooks=hooks,
+                run_config=run_config,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+            )
+        )
+
+        try:
+            return default_loop.run_until_complete(task)
+        except BaseException:
+            if not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    default_loop.run_until_complete(task)
+            raise
+        finally:
+            if not default_loop.is_closed():
+                with contextlib.suppress(RuntimeError):
+                    default_loop.run_until_complete(default_loop.shutdown_asyncgens())
 
     async def run(
         self,
