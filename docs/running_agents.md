@@ -50,6 +50,14 @@ Use [`Runner.ask_model()`][agents.run.Runner.ask_model] when you want one scoped
 
 `ask_model` uses the agent's instructions, model, model settings, prompt, and output type. It also applies [`RunConfig.call_model_input_filter`][agents.run.RunConfig.call_model_input_filter]. The call returns a [`ModelTaskResult`][agents.model_task.ModelTaskResult] containing the raw response, extracted text, parsed final output, usage, and the exact model input.
 
+Use a direct model task when:
+
+- You need a typed or textual model answer, but Python code owns the next step.
+- You want to reuse an agent's model, instructions, prompt, settings, and output schema without exposing its tools.
+- You need to inspect the raw response, usage, refusal, or filtered model input before deciding what to do.
+
+Use [`Runner.run()`][agents.run.Runner.run] instead when you want the SDK to execute tools, follow handoffs, run guardrails, persist session state, or continue for multiple turns.
+
 ```python
 from pydantic import BaseModel
 
@@ -77,9 +85,36 @@ if decision.answer == "approve":
 
 Because this is not an agent loop, model tasks do not run tools or handoffs and do not execute input/output guardrails. Use `Runner.run()` when you want the SDK to orchestrate those behaviors.
 
+`ModelTaskResult` contains:
+
+- `model_input`: the final input items sent to the model after `call_model_input_filter`, if configured.
+- `instructions`: the instructions sent to the model.
+- `raw_response`: the underlying [`ModelResponse`][agents.items.ModelResponse].
+- `output_text`: text extracted from the last assistant message.
+- `final_output`: parsed structured output when the agent has an `output_type`, otherwise `output_text`.
+- `refusal`: refusal text when the response contains one.
+- `usage` and `last_response_id`: convenience accessors for accounting and follow-up calls.
+
+For synchronous code, use [`Runner.ask_model_sync()`][agents.run.Runner.ask_model_sync]:
+
+```python
+result = Runner.ask_model_sync(reviewer, "Review this request: ...")
+```
+
 ### Work queues
 
 Use [`InMemoryWorkQueue`][agents.work_queue.InMemoryWorkQueue] or [`RedisWorkQueue`][agents.work_queue.RedisWorkQueue] when your application has staged workers and needs lease-based job coordination. A queue item has an `item_id`, JSON-like payload, numeric priority score, version, and lease. Workers reserve an item, process it, then finalize it. If a newer version is enqueued while the old version is processing, `finalize()` requeues the newer payload instead of dropping it.
+
+Queue lifecycle:
+
+1. Call `enqueue(item_id, payload, score=...)` to add or update work. Lower scores are reserved first.
+2. Call `reserve(timeout_seconds=...)` to lease one ready item.
+3. Process the item in application code.
+4. Call `finalize(item)` after successful processing.
+
+If a worker crashes or never finalizes, the item can be returned to the ready queue after its lease expires. Call `requeue_expired()` explicitly when you want to reclaim expired leases outside the normal reserve path. Call `discard(item_id)` to drop a ready item; if the item is already processing, `discard` reports `"processing"` and leaves the lease owner in control.
+
+Use `InMemoryWorkQueue` for local workers and tests. Use `RedisWorkQueue` when multiple processes or machines need to coordinate through the same queue.
 
 ```python
 from agents import InMemoryWorkQueue
@@ -101,6 +136,8 @@ if item is not None:
 
 For bounded parallel processing, use [`run_work_queue_batch()`][agents.work_queue.run_work_queue_batch]. It reserves work items, runs up to `concurrency` handlers at the same time, and finalizes each item whose handler succeeds. If a handler raises, the item is not finalized and remains governed by the queue lease.
 
+`run_work_queue_batch` accepts both async handlers and regular synchronous handlers. Synchronous handlers are run off the event loop. `max_items` defaults to `None`, which means the batch keeps reserving until `reserve()` times out with no ready work. Set `max_items` when a scheduled job or worker tick should process at most a fixed number of items before returning.
+
 ```python
 from agents import InMemoryWorkQueue, QueuedWorkItem, run_work_queue_batch
 
@@ -120,6 +157,8 @@ result = await run_work_queue_batch(
     max_items=100,
 )
 ```
+
+The returned [`WorkQueueBatchResult`][agents.work_queue.WorkQueueBatchResult] reports how many items were reserved, how many succeeded, how many failed, the finalization statuses, and per-item errors. Handler failures are collected in `errors`; those items are not finalized, so the queue's lease behavior determines when they can be retried.
 
 ### Streaming
 
