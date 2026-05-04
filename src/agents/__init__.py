@@ -233,7 +233,17 @@ from .tracing import (
 )
 from .usage import Usage
 from .version import __version__
-from .work_queue import InMemoryWorkQueue, QueuedWorkItem, RedisWorkQueue, WorkQueueDepths
+from .work_queue import (
+    InMemoryWorkQueue,
+    QueuedWorkItem,
+    RedisWorkQueue,
+    WorkQueue,
+    WorkQueueBatchResult,
+    WorkQueueDepths,
+    WorkQueueHandler,
+    WorkQueueItemError,
+    run_work_queue_batch,
+)
 
 if TYPE_CHECKING:
     from .memory.sqlite_session import SQLiteSession
@@ -435,7 +445,12 @@ __all__ = [
     "InMemoryWorkQueue",
     "QueuedWorkItem",
     "RedisWorkQueue",
+    "WorkQueue",
+    "WorkQueueBatchResult",
     "WorkQueueDepths",
+    "WorkQueueHandler",
+    "WorkQueueItemError",
+    "run_work_queue_batch",
     "ResponsesWebSocketSession",
     "RunConfig",
     "ReasoningItemIdPolicy",

@@ -99,6 +99,28 @@ if item is not None:
 
 `RedisWorkQueue` provides the same public methods for multi-process deployments when the optional `redis` extra is installed.
 
+For bounded parallel processing, use [`run_work_queue_batch()`][agents.work_queue.run_work_queue_batch]. It reserves work items, runs up to `concurrency` handlers at the same time, and finalizes each item whose handler succeeds. If a handler raises, the item is not finalized and remains governed by the queue lease.
+
+```python
+from agents import InMemoryWorkQueue, QueuedWorkItem, run_work_queue_batch
+
+
+queue = InMemoryWorkQueue(lease_seconds=30)
+
+
+async def handle(item: QueuedWorkItem) -> None:
+    output = await handle_task(item.payload)
+    await store_output(item.item_id, output)
+
+
+result = await run_work_queue_batch(
+    queue,
+    handle,
+    concurrency=8,
+    max_items=100,
+)
+```
+
 ### Streaming
 
 Streaming allows you to additionally receive streaming events as the LLM runs. Once the stream is done, the [`RunResultStreaming`][agents.result.RunResultStreaming] will contain the complete information about the run, including all the new outputs produced. You can call `.stream_events()` for the streaming events. Read more in the [streaming guide](streaming.md).

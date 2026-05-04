@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import math
 import threading
 import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal, Protocol
+
+from .util._types import MaybeAwaitable
 
 _MAX_QUEUE_SCORE = 32_503_680_000_000.0
 
@@ -33,6 +38,42 @@ class WorkQueueDepths:
         return self.ready + self.processing
 
 
+class WorkQueue(Protocol):
+    """Protocol for queues that can reserve and finalize work items."""
+
+    def reserve(self, *, timeout_seconds: float = 1.0) -> QueuedWorkItem | None:
+        """Reserve the next ready item until `finalize` or lease expiry."""
+        ...
+
+    def finalize(self, item: QueuedWorkItem) -> str:
+        """Acknowledge a reserved item or requeue it if a newer version arrived."""
+        ...
+
+
+WorkQueueHandler = Callable[[QueuedWorkItem], MaybeAwaitable[Any]]
+"""Handler function for `run_work_queue_batch`."""
+
+
+@dataclass(frozen=True)
+class WorkQueueItemError:
+    """An error raised while processing or finalizing a queued work item."""
+
+    item: QueuedWorkItem
+    error: Exception
+    phase: Literal["handler", "finalize"]
+
+
+@dataclass(frozen=True)
+class WorkQueueBatchResult:
+    """Summary from a bounded work queue batch run."""
+
+    reserved: int
+    succeeded: int
+    failed: int
+    finalize_statuses: Mapping[str, int]
+    errors: tuple[WorkQueueItemError, ...]
+
+
 def _normalize_score(score: float) -> float:
     if isinstance(score, bool):
         return float(int(score))
@@ -43,6 +84,109 @@ def _normalize_score(score: float) -> float:
     if math.isnan(normalized) or math.isinf(normalized):
         return _MAX_QUEUE_SCORE
     return normalized
+
+
+async def _call_work_queue_handler(handler: WorkQueueHandler, item: QueuedWorkItem) -> Any:
+    if inspect.iscoroutinefunction(handler):
+        return await handler(item)
+    result = await asyncio.to_thread(handler, item)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+async def run_work_queue_batch(
+    queue: WorkQueue,
+    handler: WorkQueueHandler,
+    *,
+    concurrency: int = 4,
+    max_items: int | None = None,
+    reserve_timeout_seconds: float = 1.0,
+) -> WorkQueueBatchResult:
+    """Run a bounded batch of queued work with parallel handlers.
+
+    Successful handlers are finalized. Failed handlers are not finalized, so the item remains
+    governed by the queue lease and can be retried after expiry.
+    """
+
+    if concurrency < 1:
+        raise ValueError("concurrency must be at least 1")
+    if max_items is not None and max_items < 0:
+        raise ValueError("max_items must be greater than or equal to 0")
+    if max_items == 0:
+        return WorkQueueBatchResult(
+            reserved=0,
+            succeeded=0,
+            failed=0,
+            finalize_statuses={},
+            errors=(),
+        )
+
+    reservation_lock = asyncio.Lock()
+    reserved = 0
+    succeeded = 0
+    finalize_statuses: dict[str, int] = {}
+    errors: list[WorkQueueItemError] = []
+
+    async def reserve_next() -> QueuedWorkItem | None:
+        nonlocal reserved
+        async with reservation_lock:
+            if max_items is not None and reserved >= max_items:
+                return None
+            item = await asyncio.to_thread(
+                queue.reserve,
+                timeout_seconds=reserve_timeout_seconds,
+            )
+            if item is None:
+                return None
+            reserved += 1
+            return item
+
+    async def process_item(item: QueuedWorkItem) -> None:
+        nonlocal succeeded
+        try:
+            await _call_work_queue_handler(handler, item)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            errors.append(WorkQueueItemError(item=item, error=exc, phase="handler"))
+            return
+
+        try:
+            status = await asyncio.to_thread(queue.finalize, item)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            errors.append(WorkQueueItemError(item=item, error=exc, phase="finalize"))
+            return
+
+        succeeded += 1
+        finalize_statuses[status] = finalize_statuses.get(status, 0) + 1
+
+    async def worker() -> None:
+        while True:
+            item = await reserve_next()
+            if item is None:
+                return
+            await process_item(item)
+
+    workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
+    try:
+        await asyncio.gather(*workers)
+    except BaseException:
+        for worker_task in workers:
+            if not worker_task.done():
+                worker_task.cancel()
+        await asyncio.gather(*workers, return_exceptions=True)
+        raise
+
+    return WorkQueueBatchResult(
+        reserved=reserved,
+        succeeded=succeeded,
+        failed=len(errors),
+        finalize_statuses=finalize_statuses,
+        errors=tuple(errors),
+    )
 
 
 class InMemoryWorkQueue:
@@ -512,5 +656,10 @@ __all__ = [
     "InMemoryWorkQueue",
     "QueuedWorkItem",
     "RedisWorkQueue",
+    "WorkQueue",
+    "WorkQueueBatchResult",
     "WorkQueueDepths",
+    "WorkQueueHandler",
+    "WorkQueueItemError",
+    "run_work_queue_batch",
 ]
