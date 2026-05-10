@@ -29,6 +29,10 @@ from ...items import ItemHelpers, ModelResponse, TResponseInputItem, TResponseSt
 from ...logger import logger
 from ...model_settings import ModelSettings
 from ...models._openai_retry import get_openai_retry_advice
+from ...models._response_terminal import (
+    response_error_event_failure_error,
+    response_terminal_failure_error,
+)
 from ...models._retry_runtime import should_disable_provider_managed_retries
 from ...models.chatcmpl_converter import Converter
 from ...models.chatcmpl_helpers import HEADERS, HEADERS_OVERRIDE, ChatCmplHelpers
@@ -421,17 +425,29 @@ class AnyLLMModel(Model):
             )
 
             final_response: Response | None = None
+            terminal_failure_error: ModelBehaviorError | None = None
             try:
                 async for chunk in stream:
+                    chunk_type = getattr(chunk, "type", None)
                     if isinstance(chunk, ResponseCompletedEvent):
                         final_response = chunk.response
-                    elif getattr(chunk, "type", None) in {"response.failed", "response.incomplete"}:
+                    elif chunk_type in {"response.failed", "response.incomplete"}:
                         terminal_response = getattr(chunk, "response", None)
-                        if isinstance(terminal_response, Response):
-                            final_response = terminal_response
+                        terminal_failure_error = response_terminal_failure_error(
+                            cast(str, chunk_type),
+                            terminal_response if isinstance(terminal_response, Response) else None,
+                        )
+                    elif chunk_type in {"error", "response.error"}:
+                        terminal_failure_error = response_error_event_failure_error(
+                            cast(str, chunk_type),
+                            chunk,
+                        )
                     yield chunk
             finally:
                 await self._maybe_aclose(stream)
+
+            if terminal_failure_error is not None:
+                raise terminal_failure_error
 
             if tracing.include_data() and final_response:
                 span_response.span_data.response = final_response
@@ -1187,14 +1203,28 @@ class AnyLLMModel(Model):
             if message_dict.get("role") == "assistant" and message_dict.get("tool_calls"):
                 tool_calls = message_dict.get("tool_calls", [])
                 if isinstance(tool_calls, list):
+                    split_idx = 0
                     for tool_call in tool_calls:
                         if isinstance(tool_call, dict) and tool_call.get("id"):
+                            # Create a separate assistant message for each tool call.
+                            # Only the first split keeps the assistant text/thinking
+                            # blocks/reasoning content; the rest carry tool_calls only,
+                            # to avoid duplicating signed thinking blocks (which
+                            # Anthropic rejects) and assistant text in history.
                             single_tool_msg = message_dict.copy()
                             single_tool_msg["tool_calls"] = [tool_call]
+                            if split_idx > 0:
+                                for shared_field in (
+                                    "content",
+                                    "thinking_blocks",
+                                    "reasoning_content",
+                                ):
+                                    single_tool_msg.pop(shared_field, None)
                             tool_call_messages[str(tool_call["id"])] = (
                                 index,
                                 cast(ChatCompletionMessageParam, single_tool_msg),
                             )
+                            split_idx += 1
             elif message_dict.get("role") == "tool" and message_dict.get("tool_call_id"):
                 tool_result_messages[str(message_dict["tool_call_id"])] = (
                     index,

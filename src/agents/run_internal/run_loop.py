@@ -58,6 +58,10 @@ from ..items import (
 from ..lifecycle import RunHooks
 from ..logger import logger
 from ..memory import Session
+from ..models._response_terminal import (
+    response_error_event_failure_error,
+    response_terminal_failure_error,
+)
 from ..result import RunResultStreaming
 from ..run_config import ReasoningItemIdPolicy, RunConfig
 from ..run_context import AgentHookContext, RunContextWrapper, TContext
@@ -175,6 +179,7 @@ from .turn_preparation import (
     get_all_tools,
     get_handoffs,
     get_model,
+    get_model_settings,
     get_output_schema,
     maybe_filter_model_input,
     validate_run_hooks,
@@ -380,7 +385,7 @@ async def _run_output_guardrails_for_stream(
         raise
     except Exception:
         logger.error("Unexpected error in output guardrails", exc_info=True)
-        return []
+        raise
 
 
 async def _finalize_streamed_final_output(
@@ -436,7 +441,7 @@ async def start_streaming(
     starting_input: str | list[TResponseInputItem],
     streamed_result: RunResultStreaming,
     starting_agent: Agent[TContext],
-    max_turns: int,
+    max_turns: int | None,
     hooks: RunHooks[TContext],
     context_wrapper: RunContextWrapper[TContext],
     run_config: RunConfig,
@@ -873,7 +878,7 @@ async def start_streaming(
             if run_state:
                 run_state._current_turn_persisted_item_count = 0
 
-            if current_turn > max_turns:
+            if max_turns is not None and current_turn > max_turns:
                 _error_tracing.attach_error_to_span(
                     current_span,
                     SpanError(
@@ -1337,7 +1342,7 @@ async def run_single_turn_streamed(
 
     handoffs = await get_handoffs(execution_agent, context_wrapper)
     model = get_model(execution_agent, run_config)
-    model_settings = execution_agent.model_settings.resolve(run_config.model_settings)
+    model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     final_response: ModelResponse | None = None
@@ -1484,9 +1489,14 @@ async def run_single_turn_streamed(
             is_completed_event = True
             terminal_response = event.response
         elif getattr(event, "type", None) in {"response.incomplete", "response.failed"}:
+            event_type = cast(str, event.type)
             maybe_response = getattr(event, "response", None)
-            if isinstance(maybe_response, Response):
-                terminal_response = maybe_response
+            raise response_terminal_failure_error(
+                event_type,
+                maybe_response if isinstance(maybe_response, Response) else None,
+            )
+        elif getattr(event, "type", None) in {"error", "response.error"}:
+            raise response_error_event_failure_error(cast(str, event.type), event)
 
         if terminal_response is not None:
             if is_completed_event and not terminal_response.output and streamed_response_output:
@@ -1816,7 +1826,7 @@ async def get_new_response(
         filtered.input = deduplicate_input_items_preferring_latest(filtered.input)
 
     model = get_model(execution_agent, run_config)
-    model_settings = execution_agent.model_settings.resolve(run_config.model_settings)
+    model_settings = get_model_settings(execution_agent, run_config)
     model_settings = maybe_reset_tool_choice(public_agent, tool_use_tracker, model_settings)
 
     if server_conversation_tracker is not None:

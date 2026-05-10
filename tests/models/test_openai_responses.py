@@ -7,8 +7,9 @@ from typing import Any, cast
 
 import httpx
 import pytest
-from openai import NOT_GIVEN, APIConnectionError, RateLimitError, omit
-from openai.types.responses import ResponseCompletedEvent
+from openai import NOT_GIVEN, APIConnectionError, AsyncOpenAI, RateLimitError, omit
+from openai.types.responses import ResponseCompletedEvent, ResponseErrorEvent
+from openai.types.responses.response_create_params import ContextManagement
 from openai.types.shared.reasoning import Reasoning
 
 from agents import (
@@ -23,7 +24,7 @@ from agents import (
     __version__,
     trace,
 )
-from agents.exceptions import UserError
+from agents.exceptions import ModelBehaviorError, UserError
 from agents.models._retry_runtime import (
     provider_managed_retries_disabled,
     websocket_pre_event_retries_disabled,
@@ -69,6 +70,44 @@ async def _run_responses_model_with_custom_base_url(
     await Runner.run(agent, "hi")
 
     return responses.kwargs
+
+
+async def _run_responses_model_with_official_client(
+    model_settings: ModelSettings | None = None,
+) -> list[httpx.Request]:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            content=get_response_obj([]).model_dump_json(),
+            headers={"content-type": "application/json"},
+            request=request,
+        )
+
+    http_client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    try:
+        client = AsyncOpenAI(
+            api_key="test-key",
+            base_url="https://example.test/v1",
+            http_client=http_client,
+        )
+        model = OpenAIResponsesModel(model="gpt-4", openai_client=client)
+
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=model_settings or ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
+    finally:
+        await http_client.aclose()
+
+    return requests
 
 
 class DummyWSConnection:
@@ -841,6 +880,123 @@ def test_build_response_create_kwargs_includes_extra_args_prompt_cache_key():
     )
 
     assert kwargs["prompt_cache_key"] == "cache-key"
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_includes_context_management():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    context_management: list[ContextManagement] = [
+        {"type": "compaction", "compact_threshold": 200000}
+    ]
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(context_management=context_management),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["context_management"] == context_management
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_allows_extra_arg_when_explicit_arg_is_omitted():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+    context_management: list[ContextManagement] = [
+        {"type": "compaction", "compact_threshold": 200000}
+    ]
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(extra_args={"context_management": context_management}),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["context_management"] == context_management
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_rejects_duplicate_context_management_extra_args():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    with pytest.raises(TypeError, match="multiple values.*context_management"):
+        model._build_response_create_kwargs(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(
+                context_management=[{"type": "compaction", "compact_threshold": 200000}],
+                extra_args={"context_management": [{"type": "compaction"}]},
+            ),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            previous_response_id=None,
+            conversation_id=None,
+            stream=False,
+            prompt=None,
+        )
+
+
+@pytest.mark.allow_call_model_methods
+def test_build_response_create_kwargs_keeps_unset_transport_extra_kwargs_as_none():
+    client = DummyWSClient()
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=client)  # type: ignore[arg-type]
+
+    kwargs = model._build_response_create_kwargs(
+        system_instructions=None,
+        input="hi",
+        model_settings=ModelSettings(),
+        tools=[],
+        output_schema=None,
+        handoffs=[],
+        previous_response_id=None,
+        conversation_id=None,
+        stream=False,
+        prompt=None,
+    )
+
+    assert kwargs["extra_query"] is None
+    assert kwargs["extra_body"] is None
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_with_official_client_accepts_unset_transport_extra_kwargs() -> None:
+    requests = await _run_responses_model_with_official_client()
+
+    assert len(requests) == 1
+    assert requests[0].url == "https://example.test/v1/responses"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_get_response_with_official_client_applies_transport_extra_kwargs() -> None:
+    requests = await _run_responses_model_with_official_client(
+        ModelSettings(
+            extra_query={"api-version": "2026-01-01-preview"},
+            extra_body={"extra_transport_field": "enabled"},
+        )
+    )
+
+    assert len(requests) == 1
+    assert requests[0].url == ("https://example.test/v1/responses?api-version=2026-01-01-preview")
+    assert json.loads(requests[0].content)["extra_transport_field"] == "enabled"
 
 
 @pytest.mark.allow_call_model_methods
@@ -1709,7 +1865,7 @@ async def test_websocket_model_stream_response_yields_typed_events(monkeypatch):
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_event_type", ["response.incomplete", "response.failed"])
-async def test_websocket_model_get_response_accepts_terminal_response_payload_events(
+async def test_websocket_model_get_response_rejects_failed_terminal_response_payload_events(
     monkeypatch, terminal_event_type: str
 ):
     client = DummyWSClient()
@@ -1723,23 +1879,22 @@ async def test_websocket_model_get_response_accepts_terminal_response_payload_ev
 
     monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
 
-    response = await model.get_response(
-        system_instructions=None,
-        input="hi",
-        model_settings=ModelSettings(),
-        tools=[],
-        output_schema=None,
-        handoffs=[],
-        tracing=ModelTracing.DISABLED,
-    )
-
-    assert response.response_id == "resp-terminal"
+    with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        await model.get_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        )
 
 
 @pytest.mark.allow_call_model_methods
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_event_type", ["response.incomplete", "response.failed"])
-async def test_websocket_model_stream_response_accepts_terminal_response_payload_events(
+async def test_websocket_model_stream_response_rejects_failed_terminal_response_payload_events(
     monkeypatch, terminal_event_type: str
 ):
     client = DummyWSClient()
@@ -1754,20 +1909,71 @@ async def test_websocket_model_stream_response_accepts_terminal_response_payload
     monkeypatch.setattr(model, "_open_websocket_connection", fake_open)
 
     events = []
-    async for event in model.stream_response(
-        system_instructions=None,
-        input="hi",
-        model_settings=ModelSettings(),
-        tools=[],
-        output_schema=None,
-        handoffs=[],
-        tracing=ModelTracing.DISABLED,
-    ):
-        events.append(event)
+    with pytest.raises(ModelBehaviorError, match=terminal_event_type):
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        ):
+            events.append(event)
 
     assert len(events) == 1
     assert events[0].type == terminal_event_type
     assert cast(Any, events[0]).response.id == "resp-terminal"
+
+
+@pytest.mark.allow_call_model_methods
+@pytest.mark.asyncio
+async def test_stream_response_rejects_response_error_terminal_event(monkeypatch):
+    model = OpenAIResponsesModel(model="gpt-4", openai_client=object())  # type: ignore[arg-type]
+
+    async def dummy_fetch_response(
+        system_instructions,
+        input,
+        model_settings,
+        tools,
+        output_schema,
+        handoffs,
+        previous_response_id,
+        conversation_id,
+        stream,
+        prompt,
+    ):
+        class DummyStream:
+            async def __aiter__(self):
+                yield ResponseErrorEvent(
+                    type="error",
+                    code="invalid_request_error",
+                    message="bad request",
+                    param=None,
+                    sequence_number=0,
+                )
+
+        return DummyStream()
+
+    monkeypatch.setattr(model, "_fetch_response", dummy_fetch_response)
+
+    events = []
+    with pytest.raises(ModelBehaviorError, match="invalid_request_error"):
+        async for event in model.stream_response(
+            system_instructions=None,
+            input="hi",
+            model_settings=ModelSettings(),
+            tools=[],
+            output_schema=None,
+            handoffs=[],
+            tracing=ModelTracing.DISABLED,
+        ):
+            events.append(event)
+
+    assert len(events) == 1
+    assert events[0].type == "error"
+    assert events[0].code == "invalid_request_error"
+    assert events[0].message == "bad request"
 
 
 @pytest.mark.allow_call_model_methods

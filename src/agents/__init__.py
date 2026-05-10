@@ -21,6 +21,7 @@ from .exceptions import (
     AgentsException,
     InputGuardrailTripwireTriggered,
     MaxTurnsExceeded,
+    MCPToolCancellationError,
     ModelBehaviorError,
     ModelRefusalError,
     OutputGuardrailTripwireTriggered,
@@ -110,6 +111,7 @@ from .run import (
     Runner,
     ToolErrorFormatter,
     ToolErrorFormatterArgs,
+    ToolExecutionConfig,
 )
 from .run_context import AgentHookContext, RunContextWrapper, TContext
 from .run_error_handlers import (
@@ -379,6 +381,7 @@ __all__ = [
     "GenerateDynamicPromptData",
     "Prompt",
     "MaxTurnsExceeded",
+    "MCPToolCancellationError",
     "ModelBehaviorError",
     "ModelRefusalError",
     "ToolTimeoutError",
@@ -454,6 +457,7 @@ __all__ = [
     "ResponsesWebSocketSession",
     "RunConfig",
     "ReasoningItemIdPolicy",
+    "ToolExecutionConfig",
     "ToolErrorFormatter",
     "ToolErrorFormatterArgs",
     "RunState",
